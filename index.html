@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Billions Breaker — Mobile Portrait</title>
+<style>
+  :root { --ui-bg: rgba(0,0,0,0.32); --pill: rgba(255,255,255,0.06); --accent: #1ea7ff; }
+  html,body{height:100%;margin:0;background:#071a2b; font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+  #wrap{position:relative;width:100%;height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+  #gameWrap{width:100%;max-width:720px;height:100vh;max-height:1000px;position:relative;background:#000;border-left:6px solid #071a2b;border-right:6px solid #071a2b;}
+  canvas { width:100%; height:100%; display:block; background:#000; touch-action:none; }
+  .ui { position:absolute; left:10px; top:10px; z-index:30; display:flex; gap:8px; }
+  .pill { background:var(--ui-bg); color:#fff; padding:8px 12px; border-radius:14px; font-weight:600; font-size:13px; }
+  #startBtn { position:absolute; left:50%; transform:translateX(-50%); top:46%; z-index:40; padding:12px 20px; font-size:18px; font-weight:700; border-radius:14px; background:linear-gradient(90deg,#ffd36b,#ff8a00); color:#111; box-shadow:0 6px 18px rgba(0,0,0,0.45); border:none; }
+  #message { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:35; pointer-events:none; font-size:20px; color:#fff; text-shadow:0 2px 6px rgba(0,0,0,0.6); }
+  .credit { position:absolute; right:8px; bottom:8px; z-index:40; color:rgba(255,255,255,0.9); background:rgba(0,0,0,0.22); padding:6px 10px; border-radius:10px; font-size:12px; backdrop-filter: blur(4px); }
+  .hint { position:absolute; left:10px; bottom:12px; z-index:40; font-size:12px; color:#fff; background:rgba(0,0,0,0.22); padding:6px 8px; border-radius:8px; }
+  @media (min-width:720px){ #startBtn{ top:42%; font-size:20px; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="gameWrap">
+    <canvas id="game"></canvas>
+    <div class="ui">
+      <div class="pill" id="score">Score: 0</div>
+      <div class="pill" id="bricks">Bricks: 0</div>
+    </div>
+    <div id="message"></div>
+    <button id="startBtn">Start</button>
+    <div class="hint">Drag anywhere to move paddle • Tap to launch</div>
+    <div class="credit" id="creditText"></div>
+  </div>
+</div>
+
+<script>
+/* -----------------------------
+  CONFIG (edit these two handles)
+------------------------------ */
+const YOUR_X_HANDLE = "@UrChitresh";         // <-- replace with your X handle (include @ if you want)
+const YOUR_DISCORD = "@anime._lover";        // <-- replace with your Discord name or invite
+
+/* IMAGE & AUDIO FILE NAMES (place in same folder) */
+const BACKGROUND_FILE = 'background.jpg';
+const BALL_FILE = 'mask.png';
+const LOGO_FILE = 'logo.png';
+const MUSIC_FILE = 'music.mp3'; // optional — if missing, music will be skipped
+
+/* -----------------------------
+   Canvas + sizing
+------------------------------ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = 360, H = 800; // default logical viewport (will scale)
+function resize(){
+  // portrait-first scaling
+  const parent = canvas.parentElement;
+  const rw = parent.clientWidth;
+  const rh = parent.clientHeight;
+  // use devicePixelRatio for crispness
+  const ratio = Math.min(rw, 720);
+  canvas.style.width = rw + 'px';
+  canvas.style.height = rh + 'px';
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(rw * dpr);
+  canvas.height = Math.floor(rh * dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  W = rw; H = rh;
+  // reposition some elements if needed
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* -----------------------------
+   Assets
+------------------------------ */
+const bgImg = new Image();
+bgImg.src = BACKGROUND_FILE;
+const ballImg = new Image();
+ballImg.src = BALL_FILE;
+const logoImg = new Image();
+logoImg.src = LOGO_FILE;
+
+/* background music (optional) */
+let musicAudio = null;
+function tryLoadMusic(){
+  musicAudio = new Audio();
+  musicAudio.src = MUSIC_FILE;
+  musicAudio.loop = true;
+  musicAudio.volume = 0.45;
+  musicAudio.preload = 'auto';
+  // play will be triggered only after user interaction (start)
+}
+tryLoadMusic();
+
+/* WebAudio for effects (works even without music file) */
+let audioCtx = null;
+function ensureAudio(){
+  if (!audioCtx){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+}
+function playTone(freq=440, type='sine', duration=0.08, vol=0.03){
+  try {
+    ensureAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+    o.stop(audioCtx.currentTime + duration + 0.02);
+  } catch(e){}
+}
+
+/* -----------------------------
+   Game state
+------------------------------ */
+let paddle = { w: Math.max(80, W*0.22), h: 16, x: 50, y: 0, lastX:0 };
+let ball = { x:0, y:0, r:18, vx:0, vy:0, speed:7, stuck:true };
+let bricks = [];
+let score = 0;
+let bricksLeft = 0;
+let particles = [];
+let running = false;
+
+/* HUD elements */
+const scoreEl = document.getElementById('score');
+const bricksEl = document.getElementById('bricks');
+const messageEl = document.getElementById('message');
+const startBtn = document.getElementById('startBtn');
+const creditEl = document.getElementById('creditText');
+creditEl.innerText = `${YOUR_X_HANDLE}  •  ${YOUR_DISCORD}`;
+
+/* set initial layout */
+function layout(){
+  resize();
+  paddle.w = Math.max(64, canvas.clientWidth * 0.22);
+  paddle.h = Math.max(12, canvas.clientHeight * 0.025);
+  paddle.x = (canvas.clientWidth - paddle.w)/2;
+  paddle.y = canvas.clientHeight - (canvas.clientHeight*0.12);
+  paddle.lastX = paddle.x;
+  ball.r = Math.max(10, Math.min(28, canvas.clientWidth * 0.055));
+  resetBall();
+}
+layout();
+
+/* reset ball onto paddle */
+function resetBall(){
+  ball.x = paddle.x + paddle.w/2;
+  ball.y = paddle.y - ball.r - 4;
+  ball.vx = (Math.random()*2-1) * (ball.speed*0.3);
+  ball.vy = -ball.speed;
+  ball.stuck = true;
+}
+
+/* Build bricks from logo.png opaque pixels */
+function buildBricksFromLogo(){
+  bricks = [];
+  // draw logo into offscreen canvas scaled to top area
+  const off = document.createElement('canvas');
+  const oc = off.getContext('2d');
+  const targetW = Math.floor(canvas.clientWidth * 0.86);
+  const targetH = Math.floor(canvas.clientHeight * 0.36);
+  off.width = targetW; off.height = targetH;
+  oc.clearRect(0,0,off.width, off.height);
+  // maintain aspect ratio
+  const ar = logoImg.width / logoImg.height || 1;
+  let drawW = targetW, drawH = Math.round(drawW / ar);
+  if (drawH > targetH) { drawH = targetH; drawW = Math.round(drawH * ar); }
+  oc.drawImage(logoImg, (off.width-drawW)/2, 0, drawW, drawH);
+  const imgd = oc.getImageData(0,0,off.width, off.height);
+  // pick grid density based on off width
+  const cols = Math.max(12, Math.floor(off.width / 14));
+  const rows = Math.max(6, Math.floor(off.height / 10));
+  const cellW = Math.floor(off.width / cols);
+  const cellH = Math.floor(off.height / rows);
+  const baseX = Math.round((canvas.clientWidth - (cols*cellW)) / 2);
+  const baseY = 22;
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const sx = Math.floor((c + 0.5) * cellW);
+      const sy = Math.floor((r + 0.5) * cellH);
+      if (sx < 0 || sy < 0 || sx >= off.width || sy >= off.height) continue;
+      const idx = (sy * off.width + sx) * 4;
+      const a = imgd.data[idx+3];
+      if (a > 50){
+        const rcol = imgd.data[idx], gcol = imgd.data[idx+1], bcol = imgd.data[idx+2];
+        const color = `rgb(${rcol},${gcol},${bcol})`;
+        const bx = baseX + c*cellW + 2;
+        const by = baseY + r*cellH + 2;
+        bricks.push({ x:bx, y:by, w: cellW-4, h: cellH-4, alive:true, color });
+      }
+    }
+  }
+  bricksLeft = bricks.length;
+  bricksEl.innerText = `Bricks: ${bricksLeft}`;
+}
+
+/* Start / Restart */
+function startGame(){
+  if (!logoImg.complete) {
+    messageEl.innerText = 'Loading assets...';
+    return;
+  }
+  layout();
+  buildBricksFromLogo();
+  score = 0;
+  updateHUD();
+  messageEl.innerText = '';
+  running = true;
+  startBtn.style.display = 'none';
+  // ensure audio context unlocked by user gesture
+  try {
+    ensureAudio();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch(e){}
+  // start music if available
+  if (musicAudio) {
+    musicAudio.play().catch(()=>{/* autoplay blocked until gesture; start already triggered by button so should be OK */});
+  }
+  lastTime = performance.now();
+}
+
+/* UI wiring */
+startBtn.addEventListener('click', ()=>{
+  startGame();
+});
+
+/* HUD update */
+function updateHUD(){
+  scoreEl.innerText = `Score: ${score}`;
+  bricksEl.innerText = `Bricks: ${bricksLeft}`;
+}
+
+/* physics helpers */
+function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+/* collision detection */
+function circleRect(cx,cy,r,rx,ry,rw,rh){
+  const nearestX = Math.max(rx, Math.min(cx, rx+rw));
+  const nearestY = Math.max(ry, Math.min(cy, ry+rh));
+  const dx = cx - nearestX;
+  const dy = cy - nearestY;
+  return (dx*dx + dy*dy) < (r*r);
+}
+
+/* particle spawn */
+function spawnParticles(x,y,color){
+  for (let i=0;i<10;i++){
+    particles.push({
+      x, y,
+      vx: (Math.random()*2-1)*2,
+      vy: (Math.random()*2-1)*2,
+      life: 0.35 + Math.random()*0.35,
+      t: 0,
+      color
+    });
+  }
+}
+
+/* main update/render loop */
+let lastTime = performance.now();
+function loop(now){
+  const dt = Math.min(0.035, (now - lastTime)/1000);
+  lastTime = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* update logic */
+function update(dt){
+  if (!running) return;
+  // move ball
+  if (!ball.stuck){
+    ball.x += ball.vx * dt * 60;
+    ball.y += ball.vy * dt * 60;
+  } else {
+    // follow paddle
+    ball.x = paddle.x + paddle.w/2;
+    ball.y = paddle.y - ball.r - 4;
+  }
+
+  // walls
+  if (ball.x - ball.r < 0){ ball.x = ball.r; ball.vx *= -1; playTone(260, 'sine', 0.04, 0.02); }
+  if (ball.x + ball.r > canvas.clientWidth){ ball.x = canvas.clientWidth - ball.r; ball.vx *= -1; playTone(260, 'sine', 0.04, 0.02); }
+  if (ball.y - ball.r < 0){ ball.y = ball.r; ball.vy *= -1; playTone(320, 'sine', 0.04, 0.02); }
+
+  // bottom (lose)
+  if (ball.y - ball.r > canvas.clientHeight + 30){
+    running = false;
+    messageEl.innerText = 'Game Over — Tap to restart';
+    startBtn.style.display = 'block';
+    playTone(120, 'square', 0.18, 0.06);
+    try { if (musicAudio) musicAudio.pause(); } catch(e){}
+  }
+
+  // paddle collision — angle-sensitive + spin based on paddle movement
+  if (circleRect(ball.x, ball.y, ball.r, paddle.x, paddle.y, paddle.w, paddle.h) && ball.vy > -0.1){
+    // compute normalized hit (-1 left .. 1 right)
+    const relative = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2);
+    const maxAngle = 75 * Math.PI/180; // max deflection angle from vertical
+    const angle = relative * maxAngle;
+    const speed = Math.min(14, Math.hypot(ball.vx, ball.vy) * 1.01 + 0.05); // small speed preservation/increase
+    ball.vx = Math.sin(angle) * speed;
+    ball.vy = -Math.cos(angle) * speed;
+    // spin from paddle movement
+    const padMove = (paddle.x - paddle.lastX);
+    ball.vx += padMove * 0.12 * (canvas.clientWidth/360);
+    // nudge ball above paddle to avoid repeated collision
+    ball.y = paddle.y - ball.r - 0.01;
+    playTone(560, 'sine', 0.06, 0.03);
+  }
+
+  // bricks
+  for (let i=0;i<bricks.length;i++){
+    const b = bricks[i];
+    if (!b.alive) continue;
+    if (circleRect(ball.x, ball.y, ball.r, b.x, b.y, b.w, b.h)){
+      // determine collision side using previous position
+      const prevX = ball.x - ball.vx * dt * 60;
+      const prevY = ball.y - ball.vy * dt * 60;
+      let side = 'y';
+      if (prevX + ball.r < b.x || prevX - ball.r > b.x + b.w) side = 'x';
+      if (side === 'x') ball.vx *= -1; else ball.vy *= -1;
+      b.alive = false;
+      bricksLeft--;
+      score += 10;
+      spawnParticles(ball.x, ball.y, b.color);
+      playTone(760, 'sawtooth', 0.07, 0.03);
+      updateHUD();
+      if (bricksLeft <= 0){
+        running = false;
+        messageEl.innerText = 'You Win! Tap to play again';
+        startBtn.style.display = 'block';
+        try { if (musicAudio) musicAudio.pause(); } catch(e){}
+      }
+      break;
+    }
+  }
+
+  // particles
+  for (let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.t += dt;
+    if (p.t >= p.life){ particles.splice(i,1); continue; }
+    p.x += p.vx * 40 * dt;
+    p.y += p.vy * 40 * dt;
+  }
+
+  // store last paddle pos for spin calc
+  paddle.lastX = paddle.x;
+}
+
+/* rendering */
+function render(){
+  // draw background cover
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  ctx.clearRect(0,0,cw,ch);
+  if (bgImg.complete){
+    // cover style
+    const ar = bgImg.width / bgImg.height;
+    let bw = cw, bh = Math.round(bw / ar);
+    if (bh < ch){ bh = ch; bw = Math.round(bh * ar); }
+    ctx.drawImage(bgImg, (cw-bw)/2, (ch-bh)/2, bw, bh);
+  } else {
+    ctx.fillStyle = '#051222';
+    ctx.fillRect(0,0,cw,ch);
+  }
+
+  // dim overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.14)';
+  ctx.fillRect(0,0,cw,ch);
+
+  // draw bricks
+  for (const b of bricks){
+    if (!b.alive) continue;
+    ctx.fillStyle = b.color;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // paddle
+  ctx.save();
+  const grad = ctx.createLinearGradient(paddle.x, paddle.y, paddle.x + paddle.w, paddle.y);
+  grad.addColorStop(0, '#2a6fbf'); grad.addColorStop(1, '#0b2d66');
+  ctx.fillStyle = grad;
+  roundRect(ctx, paddle.x, paddle.y, paddle.w, paddle.h, 10);
+  ctx.fill();
+  ctx.restore();
+
+  // ball (draw mask image)
+  const drawW = ball.r*2, drawH = ball.r*2;
+  ctx.save();
+  ctx.translate(ball.x, ball.y);
+  ctx.rotate(Math.sin(performance.now()*0.0012) * 0.07);
+  if (ballImg.complete){
+    ctx.drawImage(ballImg, -drawW/2, -drawH/2, drawW, drawH);
+  } else {
+    ctx.beginPath(); ctx.fillStyle = '#fff'; ctx.arc(0,0,ball.r,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+
+  // particles
+  for (const p of particles){
+    const a = 1 - (p.t / p.life);
+    ctx.beginPath();
+    ctx.fillStyle = toRGBA(p.color || '#fff', 0.9 * a);
+    ctx.arc(p.x, p.y, 3 + (1-a)*4, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+/* rounded rect helper */
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  const radius = Math.min(r, w/2, h/2);
+  ctx.moveTo(x+radius, y);
+  ctx.lineTo(x+w-radius, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+radius);
+  ctx.lineTo(x+w, y+h-radius);
+  ctx.quadraticCurveTo(x+w, y+h, x+w-radius, y+h);
+  ctx.lineTo(x+radius, y+h);
+  ctx.quadraticCurveTo(x, y+h, x, y+h-radius);
+  ctx.lineTo(x, y+radius);
+  ctx.quadraticCurveTo(x, y, x+radius, y);
+  ctx.closePath();
+}
+
+/* color helper */
+function toRGBA(rgb, a){
+  // rgb like "rgb(r,g,b)" or hex; fall back to white
+  if (!rgb) return `rgba(255,255,255,${a})`;
+  if (rgb.startsWith('rgb')){
+    const nums = rgb.match(/\d+/g) || [255,255,255];
+    return `rgba(${nums[0]},${nums[1]},${nums[2]},${a})`;
+  }
+  // hex fallback
+  const hex = rgb.replace('#','');
+  const bigint = parseInt(hex,16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+/* ---------- Input: touch / mouse ---------- */
+let touching = false;
+let touchId = null;
+
+function onPointerDown(x){
+  // hide start if visible and treat as tap to launch if game started
+  if (!running){
+    // start or restart
+    if (startBtn.style.display !== 'none') {
+      startGame();
+      return;
+    }
+  }
+  touching = true;
+  // set paddle center to touch
+  paddle.x = clamp(x - paddle.w/2, 6, canvas.clientWidth - paddle.w - 6);
+}
+
+function onPointerMove(x){
+  if (!touching) return;
+  paddle.x = clamp(x - paddle.w/2, 6, canvas.clientWidth - paddle.w - 6);
+  if (ball.stuck) {
+    ball.x = paddle.x + paddle.w/2;
+  }
+}
+
+function onPointerUp(){
+  // if player tapped (short tap) and ball stuck -> launch
+  if (ball.stuck && running){
+    ball.stuck = false;
+    ball.vx = (Math.random()*2-1) * (ball.speed*0.45);
+    ball.vy = -ball.speed;
+    messageEl.innerText = '';
+    playTone(420, 'triangle', 0.06, 0.03);
+  }
+  touching = false;
+  touchId = null;
+}
+
+/* mouse fallback */
+canvas.addEventListener('mousedown', (e) => {
+  onPointerDown(e.clientX - canvas.getBoundingClientRect().left);
+});
+window.addEventListener('mousemove', (e) => {
+  if (e.buttons) onPointerMove(e.clientX - canvas.getBoundingClientRect().left);
+});
+window.addEventListener('mouseup', ()=> onPointerUp());
+
+/* touch handlers */
+canvas.addEventListener('touchstart', (ev) => {
+  ev.preventDefault();
+  const t = ev.changedTouches[0];
+  touchId = t.identifier;
+  const x = t.clientX - canvas.getBoundingClientRect().left;
+  onPointerDown(x);
+}, {passive:false});
+canvas.addEventListener('touchmove', (ev) => {
+  ev.preventDefault();
+  // find touch with touchId if possible
+  let t = ev.changedTouches[0];
+  for (let i=0;i<ev.touches.length;i++){
+    if (ev.touches[i].identifier === touchId){ t = ev.touches[i]; break; }
+  }
+  const x = t.clientX - canvas.getBoundingClientRect().left;
+  onPointerMove(x);
+}, {passive:false});
+canvas.addEventListener('touchend', (ev) => {
+  ev.preventDefault();
+  onPointerUp();
+}, {passive:false});
+canvas.addEventListener('touchcancel', (ev) => {
+  ev.preventDefault();
+  onPointerUp();
+}, {passive:false});
+
+/* allow tapping the canvas to restart when game over/win */
+canvas.addEventListener('click', (e) => {
+  if (!running && startBtn.style.display !== 'none') {
+    startGame();
+  }
+});
+
+/* When logoImg loads, (re)build bricks for preview */
+logoImg.addEventListener('load', ()=> {
+  if (!running) buildBricksFromLogo();
+});
+
+/* small periodic HUD update */
+setInterval(updateHUD, 350);
+
+</script>
+</body>
+</html>
